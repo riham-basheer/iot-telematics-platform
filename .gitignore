@@ -1,0 +1,41 @@
+# Byte-compiled & cache artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Python virtual environments & secrets
+.venv/
+env/
+venv/
+*.env
+
+# Local Lakehouse Storage (Never commit data files)
+data/raw/*
+data/bronze/*
+data/silver/*
+data/gold/*
+!data/**/.gitkeep
+
+# PySpark & Delta runtime checkpoints
+.checkpoint/
+spark-warehouse/
+metastore_db/
+derby.log
+*.parquet
+*.csv
+*.xlsx
+
+# Apache Airflow state & logs
+airflow.cfg
+airflow.db
+logs/
+airflow/logs/*
+airflow/config/*
+airflow/plugins/*
+
+# IDE & OS system files
+.vscode/
+.idea/
+.DS_Store
+*.swp
