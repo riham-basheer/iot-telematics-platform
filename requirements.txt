@@ -6,6 +6,7 @@ sqlalchemy>=2.0.25
 requests>=2.31.0
 pyarrow>=14.0.2
 pandas>=2.1.4
+numpy>=2.0.0
 
 # Environment & Testing
 python-dotenv>=1.0.0
