@@ -35,7 +35,7 @@ def fetch_and_cache_historical_weather():
     if not hourly or "time" not in hourly:
         raise ValueError("Invalid Open-Meteo response structure")
 
-    # Construct tabular structure
+    # Construct tabular structure with the 4 cols needed later for the bronze table
     df = pd.DataFrame({
         "weather_time": pd.to_datetime(hourly["time"], utc=True),
         "temperature_c": pd.to_numeric(hourly.get("temperature_2m", []), errors="coerce"),
