@@ -1,6 +1,8 @@
 import os
 import sys
 import argparse
+
+import warnings
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (DoubleType, IntegerType, LongType, TimestampType)
@@ -90,7 +92,11 @@ def transform_bronze_telemetry(df):
 
     # safely casting physical signals (preserving all the nulls)
     def safe_cast(name, dtype):
-        return F.col(name).cast(dtype) if name in df.columns else F.lit(None).cast(dtype)
+        # Convert string and IEEE NaN into true SQL NULL for all physical sensors
+        if name not in df.columns:
+            return F.lit(None).cast(dtype)
+        c = F.col(name).cast(dtype)
+        return F.when(c.isNull() | F.isnan(c), F.lit(None).cast(dtype)).otherwise(c)
 
     df_final = df_dedup.withColumn("engine_rpm", safe_cast("engine_rpm_rpm", DoubleType())) \
                 .withColumn("fuel_rate_l_hr", safe_cast("fuel_rate_l_per_hr", DoubleType())) \
@@ -101,9 +107,20 @@ def transform_bronze_telemetry(df):
                 .withColumn("ac_power_watts", safe_cast("air_conditioning_power_watts", DoubleType())) \
                 .withColumn("heater_power_watts", safe_cast("heater_power_watts", DoubleType()))
 
-    # (7) Compute combined HVAC power draw
-    df_final = df_final.withColumn("hvac_power_watts", 
-        F.coalesce(F.col("ac_power_watts"), F.lit(0.0)) + F.coalesce(F.col("heater_power_watts"), F.lit(0.0)))
+    # (7) Compute combined HVAC power draw: NULL for ICE, numeric sum for EV/HEV
+    has_ac = F.col("ac_power_watts").isNotNull() & ~F.isnan(F.col("ac_power_watts"))
+    has_heater = F.col("heater_power_watts").isNotNull() & ~F.isnan(F.col("heater_power_watts"))
+
+    df_final = df_final.withColumn(
+        "hvac_power_watts",
+        F.when(
+            ~has_ac & ~has_heater,
+            F.lit(None).cast(DoubleType())
+        ).otherwise(
+            F.coalesce(F.nanvl(F.col("ac_power_watts"), F.lit(0.0)), F.lit(0.0)) +
+            F.coalesce(F.nanvl(F.col("heater_power_watts"), F.lit(0.0)), F.lit(0.0))
+        )
+    )
 
     # truncating hour for the downstream weather alignment
     df_final = df_final.withColumn("event_hour", F.date_trunc("hour", F.col("event_time")))
@@ -111,21 +128,81 @@ def transform_bronze_telemetry(df):
     return df_final
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="BRONZE to SILVER telemetry Pipeline for VED dataset")
-    parser.add_argument("--input_path", type=str, default="data/raw/VED_171101_week.csv", help="Path to the raw bronze CSV file.")
-    #parser.add_argument("--output_path", type=str, default="data/silver/", help="Path to save the transformed silver Parquet file.")
-    args = parser.parse_args()
+def join_offline_weather(df_telemetry, parquet_weather_path, spark):
+    """
+    Join telemetry data with offline weather data (parquet) based on event_hour
+    eliminating the need for external API calls during batch processing and backfilling.
+    """
+    if not os.path.exists(parquet_weather_path):
+        warnings.warn(f"Offline Weather Parquet file not found at {parquet_weather_path}. Continuing without weather...")
+        return df_telemetry.withColumn("ambient_temp_c", F.lit(None).cast(DoubleType())) \
+            .withColumn("precipitation_mm", F.lit(None).cast(DoubleType())) \
+            .withColumn("wind_speed_kmh", F.lit(None).cast(DoubleType()))
 
+    print(f"-- Joining telemetry with offline weather data from {parquet_weather_path} ---")
+    df_weather = spark.read.parquet(parquet_weather_path)
+    df_weather = clean_column_headers(df_weather)
+
+    time_col = "time" if "time" in df_weather.columns else df_weather.columns[0]
+    df_weather = df_weather.withColumn("weather_hour", F.date_trunc("hour", F.to_timestamp(F.col(time_col), "yyyy-MM-dd HH:mm:ss")))
+
+    temp_col = [c for c in df_weather.columns if "temp" in c][0]
+    precip_col = [c for c in df_weather.columns if "precip" in c][0]
+    wind_col = [c for c in df_weather.columns if "wind" in c][0]
+
+    weather_lookup = df_weather.select(
+        F.col("weather_hour").alias("event_hour"),
+        F.col(temp_col).cast(DoubleType()).alias("ambient_temp_c"),
+        F.col(precip_col).cast(DoubleType()).alias("precipitation_mm"),
+        F.col(wind_col).cast(DoubleType()).alias("wind_speed_kmh")
+    ).dropDuplicates(["event_hour"])
+
+    df_joined = df_telemetry.join(F.broadcast(weather_lookup), on="event_hour", how="left")
+    return df_joined
+
+
+
+def run_bronze_to_silver_pipeline(input_path, output_path, parquet_weather_path=None):
+    """
+    Run the Bronze to Silver telemetry pipeline:
+        1. Read raw bronze CSV
+        2. Transform to silver format
+        3. Optionally join with offline weather data
+        4. Write to Parquet
+    """
     spark = get_spark_session()
 
-    print(f"\n--- Reading telemetry from {args.input_path} ---")
-    if os.path.exists(args.input_path):
-        df_bronze = spark.read.option("header", "true").option("inferSchema", "true").csv(args.input_path)
-        df_silver = transform_bronze_telemetry(df_bronze)
-        #print(f"\n--- Writing transformed silver telemetry to {args.output_path} ---")
-        #df_silver.write.mode("overwrite").parquet(args.output_path)
+    if not os.path.exists(input_path):
+        print(f"ERROR: Input path {input_path} does not exist. Please provide a valid path.")
+        spark.stop()
+        sys.exit(1)
+    print(f"\n1. Ingesting raw telemetry from {input_path}")
+    df_bronze = spark.read.option("header", "true").option("inferSchema", "true").csv(input_path)
+    
+    print("2. Executing cleaning and feature engineering...")
+    df_silver = transform_bronze_telemetry(df_bronze)
 
-        print(f"\n--- YAY! Bronze to Silver Transformation is complete. Total rows: {df_silver.count()} ----")
-    else:
-        print(f"\n--- ERROR: Input path {args.input_path} does not exist. Please provide a valid path. ---")
+    print("3. Joining local weather cache...")
+    df_silver = join_offline_weather(df_silver, parquet_weather_path, spark)
+
+    df_silver = df_silver.withColumn("year", F.year(F.col("event_time"))) \
+                         .withColumn("month", F.format_string("%02d", F.month("event_time")))
+
+    print(f"4. Writing transformed silver parquet partitioned by year/month to: {output_path}")
+    df_silver.write.mode("overwrite").partitionBy("year", "month").parquet(output_path)
+
+    print(f"\n--- YAY! Bronze to Silver Transformation is complete. Total rows: {df_silver.count()} ----")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="BRONZE to SILVER Pipeline for VED dataset")
+    parser.add_argument("--input-path", type=str, default="data/raw/VED_171101_week.csv", \
+                         help="Path to the raw bronze CSV file.")
+    parser.add_argument("--output-path", type=str, default="data/silver/telemetry_enriched", \
+                        help="Path to save the transformed silver Parquet file.")
+    parser.add_argument("--weather-cache", type=str, \
+                        default="data/bronze/weather/historical_bulk/weather_ann_arbor_2017_2018.parquet", \
+                        help="Path to the Parquet weather data file.")
+
+    args = parser.parse_args()
+
+    run_bronze_to_silver_pipeline(args.input_path, args.output_path, args.weather_cache)
