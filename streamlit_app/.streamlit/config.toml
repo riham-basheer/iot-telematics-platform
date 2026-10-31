@@ -1,0 +1,7 @@
+[theme]
+primaryColor = "#2563EB"
+font = "sans serif"
+
+[client]
+toolbarMode = "developer"
+EOF
