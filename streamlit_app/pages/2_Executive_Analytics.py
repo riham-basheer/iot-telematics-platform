@@ -6,6 +6,7 @@ import numpy as np
 
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # Resolve repository root
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -550,8 +551,104 @@ def render_operational_waste_tab(filtered_df: pd.DataFrame):
     )
 
 
+
 # -------------------------------------- #
-# Main
+# Tab 3: Climate Sensitivity Analysis
+# -------------------------------------- #
+def render_climate_sensitivity_tab(filtered_df: pd.DataFrame):
+    st.markdown("##### Seasonal Weather & Climate Sensitivity Analysis")
+    
+    # ffilter out null temperatures
+    df_temp = filtered_df.dropna(subset=["avg_ambient_temp_c"]).copy()
+    
+    if df_temp.empty:
+        st.warning("No temperature data available for the selected filters.")
+        return
+
+   
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    
+    # 1. Primary Y-Axis: HVAC Power Load (Blue)
+    df_hvac = df_temp.dropna(subset=["avg_hvac_power_watts"])
+    if not df_hvac.empty:
+        # Scatter
+        fig.add_trace(
+            go.Scatter(
+                x=df_hvac["avg_ambient_temp_c"],
+                y=df_hvac["avg_hvac_power_watts"],
+                mode="markers",
+                name="HVAC Load (W)",
+                marker=dict(color="#0EA5E9", size=4, opacity=0.4),
+                showlegend=False
+            ),
+            secondary_y=False
+        )
+        
+        # 2nd-Order Polynomial Trendline
+        z_hvac = np.polyfit(df_hvac["avg_ambient_temp_c"], df_hvac["avg_hvac_power_watts"], 2)
+        p_hvac = np.poly1d(z_hvac)
+        x_trend = np.linspace(df_hvac["avg_ambient_temp_c"].min(), df_hvac["avg_ambient_temp_c"].max(), 100)
+        
+        fig.add_trace(
+            go.Scatter(
+                x=x_trend, y=p_hvac(x_trend), mode="lines", name="HVAC Trend", line=dict(color="#0EA5E9", width=3)), secondary_y=False
+        )
+
+    # 2. Secondary Y-Axis: EV Battery Depletion Rate (Amber)
+    # Filter strictly for EVs with distance > 0 to avoid division by zero
+    df_ev = df_temp[(df_temp["engine_type"] == "EV") & (df_temp["distance_km"] > 0)].copy()
+    if not df_ev.empty:
+        df_ev["ev_depletion_rate"] = (df_ev["energy_consumed_kwh"] / df_ev["distance_km"]) * 100
+        df_ev = df_ev.dropna(subset=["ev_depletion_rate"])
+        
+        # Scatter
+        fig.add_trace(
+            go.Scatter(
+                x=df_ev["avg_ambient_temp_c"],
+                y=df_ev["ev_depletion_rate"],
+                mode="markers",
+                name="EV Depletion (kWh/100km)",
+                marker=dict(color="#F59E0B", size=4, opacity=0.4),
+                showlegend=False
+            ),
+            secondary_y=True
+        )
+        
+        # 2nd-Order Polynomial Trendline
+        z_ev = np.polyfit(df_ev["avg_ambient_temp_c"], df_ev["ev_depletion_rate"], 2)
+        p_ev = np.poly1d(z_ev)
+        x_trend_ev = np.linspace(df_ev["avg_ambient_temp_c"].min(), df_ev["avg_ambient_temp_c"].max(), 100)
+        
+        fig.add_trace(
+            go.Scatter(
+                x=x_trend_ev,
+                y=p_ev(x_trend_ev),
+                mode="lines",
+                name="EV Depletion Trend",
+                line=dict(color="#F59E0B", width=3)
+            ),
+            secondary_y=True
+        )
+
+    fig.update_layout(
+        height=400,
+        margin=dict(l=20, r=20, t=30, b=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        font=dict(family="Inter, sans-serif", color="#E2E8F0")
+    )
+    
+    fig.update_xaxes(title_text="Ambient Temperature (°C)", showgrid=True, gridcolor="rgba(143, 197, 218, 0.34)")
+    fig.update_yaxes(title_text="Average Cabin HVAC Energy Load (W)", secondary_y=False, showgrid=True, gridcolor="rgba(143, 197, 218, 0.34)")
+    
+    fig.update_yaxes(title_text="EV Battery Depletion Rate (kWh/100 km)", secondary_y=True, showgrid=False)
+    
+
+    st.plotly_chart(fig, use_container_width=True)
+
+# -------------------------------------- #
+#                Main
 # -------------------------------------- #
 
 if __name__ == "__main__":
@@ -590,3 +687,5 @@ if __name__ == "__main__":
     with tab_waste:
         render_operational_waste_tab(filtered_df)
 
+    with tab_climate:
+        render_climate_sensitivity_tab(filtered_df)
