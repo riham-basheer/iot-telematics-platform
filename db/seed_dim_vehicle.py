@@ -54,33 +54,31 @@ def seed_vehicles():
     df_ice = pd.read_excel(ice_files[0]) if ice_files[0].endswith((".xls", ".xlsx")) else pd.read_csv(ice_files[0])
     df_ev = pd.read_excel(ev_files[0]) if ev_files[0].endswith((".xls", ".xlsx")) else pd.read_csv(ev_files[0])
 
+    # Strip header whitespace
+    df_ice.columns = df_ice.columns.str.strip()
+    df_ev.columns = df_ev.columns.str.strip()
+
     vehicles = []
     for _, r in df_ice.iterrows():
-        try:
-            vehicles.append((
-                int(r["VehId"]),
-                clean_str(r.get("Vehicle Class"), "Passenger Car"),
-                clean_str(r.get("Vehicle Type"), "ICE"),
-                parse_displacement(r.get("Engine Configuration & Displacement")),
-                parse_weight_kg(r.get("Generalized_Weight"))
-            ))
-        except (ValueError, TypeError):
-            continue
+        vehicles.append((
+            int(r["VehId"]),
+            clean_str(r.get("Vehicle Class"), "Unspecified"),
+            clean_str(r.get("Vehicle Type")),
+            parse_displacement(r.get("Engine Configuration & Displacement")),
+            parse_weight_kg(r.get("Generalized_Weight"))
+        ))
 
     for _, r in df_ev.iterrows():
-        try:
-            vehicles.append((
-                int(r["VehId"]),
-                clean_str(r.get("Vehicle Class"), "Passenger Car"),
-                clean_str(r.get("EngineType", r.get("Vehicle Type")), "EV"),
-                parse_displacement(r.get("Engine Configuration & Displacement")),
-                parse_weight_kg(r.get("Generalized_Weight"))
-            ))
-        except (ValueError, TypeError):
-            continue
+        vehicles.append((
+            int(r["VehId"]),
+            clean_str(r.get("Vehicle Class"), "Unspecified"),
+            clean_str(r.get("EngineType", r.get("Vehicle Type")), "EV"),
+            parse_displacement(r.get("Engine Configuration & Displacement")),
+            parse_weight_kg(r.get("Generalized_Weight"))
+        ))
 
     with get_db_cursor(commit=True) as cur:
-        cur.execute("TRUNCATE TABLE dim_vehicle CASCADE;")
+        #cur.execute("TRUNCATE TABLE dim_vehicle CASCADE;")
         insert_sql = """
             INSERT INTO dim_vehicle (veh_id, vehicle_class, engine_type, engine_displacement_l, curb_weight_kg)
             VALUES (%s, %s, %s, %s, %s)
