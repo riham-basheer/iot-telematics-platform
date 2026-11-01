@@ -2,6 +2,10 @@ import sys
 from pathlib import Path
 import pandas as pd
 import streamlit as st
+import numpy as np
+
+import plotly.express as px
+import plotly.graph_objects as go
 
 # Resolve repository root
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -16,11 +20,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-POWERTRAIN_LABELS = {
-    "ICE": "ICE (Gasoline)",
-    "HEV": "HEV (Hybrid Electric)",
-    "PHEV": "PHEV (Plug-in Hybrid)",
-    "EV": "EV (All-Electric)",
+POWERTRAIN_COLORS = {
+    "ICE": "#0EA5E9",  # Bright blue
+    "HEV": "#3B82F6",  # Standard blue
+    "PHEV": "#6366F1", # Indigo
+    "EV": "#10B981"    # Emerald green
 }
 
 # -------------------------------------- #
@@ -39,16 +43,18 @@ def apply_page_styles():
             color: var(--text-color);
         }
 
-        /* 6 KPI Metric Cards */
+        /* 6 KPI Metric Cards - Left aligned with larger numbers */
         .kpi-card {
             background-color: var(--secondary-background-color);
             border: 1px solid rgba(128, 128, 128, 0.2);
             border-radius: 10px;
-            padding: 16px 18px;
+            padding: 18px 22px;
             height: 100%;
             display: flex;
             flex-direction: column;
             justify-content: space-between;
+            text-align: left;
+            align-items: flex-start;
             transition: all 0.2s ease;
         }
         .kpi-card:hover {
@@ -60,20 +66,21 @@ def apply_page_styles():
             display: flex;
             justify-content: space-between;
             align-items: center;
+            width: 100%;
             margin-bottom: 6px;
         }
         .kpi-label {
             font-family: 'Plus Jakarta Sans', sans-serif;
-            font-size: 0.70rem;
+            font-size: 0.74rem;
             font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.08em;
+            letter-spacing: 0.06em;
             opacity: 0.8;
             color: var(--text-color);
         }
         .kpi-value {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 1.65rem;
+            font-size: 2.15rem;
             font-weight: 700;
             line-height: 1.2;
             letter-spacing: -0.03em;
@@ -81,9 +88,9 @@ def apply_page_styles():
             margin: 4px 0 6px 0;
         }
         .kpi-subtext {
-            font-size: 0.78rem;
+            font-size: 0.80rem;
             opacity: 0.75;
-            line-height: 1.4;
+            line-height: 1.35;
             color: var(--text-color);
         }
         .kpi-badge {
@@ -94,8 +101,8 @@ def apply_page_styles():
             border-radius: 4px;
             letter-spacing: 0.05em;
             text-transform: uppercase;
+            white-space: nowrap;
         }
-
         .header-tag {
             display: inline-block;
             background: rgba(37, 99, 235, 0.15);
@@ -107,6 +114,29 @@ def apply_page_styles():
             border: 1px solid rgba(37, 99, 235, 0.35);
             letter-spacing: 0.05em;
         }
+        /* 1. Reduce top canvas padding to pull cards up */
+        .block-container {
+            padding-top: 2rem !important;
+        }
+
+        /* 2. Style the top header bar and inject the title */
+        header[data-testid="stHeader"] {
+            background-color: var(--background-color);
+        }
+        header[data-testid="stHeader"]::before {
+            content: "Fleet Electrification & Operational Efficiency";
+            position: absolute;
+            left: 4.5rem;
+            top: 50%;
+            transform: translateY(-50%);
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: var(--text-color);
+            letter-spacing: -0.02em;
+            pointer-events: none;
+        }
+    
         </style>
         """,
         unsafe_allow_html=True
@@ -138,7 +168,7 @@ def load_fact_trips_data():
             f.co2_avoided_kg,
             f.avg_ambient_temp_c,
             f.avg_hvac_power_watts,
-            COALESCE(v.vehicle_class, 'Unknown') AS vehicle_class
+            COALESCE(v.vehicle_class, 'Unspecified') AS vehicle_class
         FROM fact_trips_summary f
         LEFT JOIN dim_vehicle v ON f.veh_id = v.veh_id;
     """
@@ -148,40 +178,59 @@ def load_fact_trips_data():
 # -------------------------------------- #
 # Reusable KPI Component
 # -------------------------------------- #
-def render_kpi_card(label: str, value: str, subtext: str, tag: str, color: str):
+def render_kpi_card(label: str, value: str, subtext: str, color: str):
     """ because there's 6 of them """
     st.markdown(
-        f"""
+      f"""
         <div class="kpi-card" style="border-top: 4px solid {color};">
-            <div class="kpi-card-header">
-                <span class="kpi-label">{label}</span>
-                <span class="kpi-badge" style="background-color: {color}1f; color: {color}; border: 1px solid {color}4d;">{tag}</span>
-            </div>
+            <div class="kpi-label">{label}</div>
             <div class="kpi-value">{value}</div>
             <div class="kpi-subtext">{subtext}</div>
         </div>
         """,
-        unsafe_allow_html=True
+      unsafe_allow_html=True,
     )
 
 
 # -------------------------------------- #
 # Filter Controls & Slicers
 # -------------------------------------- #
+
 def render_sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
     st.sidebar.markdown("### Fleet Slicers")
 
-    # 1. Season Filter
+    # 1. Calendar Date Range Picker
+    trip_dates = pd.to_datetime(df["trip_start_time"]).dt.date
+    min_date = trip_dates.min()
+    max_date = trip_dates.max()
+
+    if pd.notnull(min_date) and pd.notnull(max_date):
+        date_selection = st.sidebar.date_input(
+            "Calendar Date Range",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date,
+            help="Filter telemetry trips between two dates within the warehouse horizon."
+        )
+        if isinstance(date_selection, (list, tuple)) and len(date_selection) == 2:
+            start_date, end_date = date_selection
+        elif isinstance(date_selection, (list, tuple)) and len(date_selection) == 1:
+            start_date = end_date = date_selection[0]
+        else:
+            start_date, end_date = min_date, max_date
+    else:
+        start_date, end_date = None, None
+
+    # 2. Season Slicer
     available_seasons = sorted(df["season_category"].dropna().unique().tolist())
     selected_seasons = st.sidebar.multiselect(
-        "Seasonal Range Selector",
+        "Seasonal Category",
         options=available_seasons,
         default=available_seasons,
         help="Filter across multi-season baselines (Fall, Winter, Spring, Summer)."
     )
 
-
-    # 2. Powertrain Slicer
+    # 3. Powertrain Slicer 
     available_powertrains = sorted(df["engine_type"].dropna().unique().tolist())
     selected_powertrains = st.sidebar.multiselect(
         "Powertrain Slicer",
@@ -191,48 +240,38 @@ def render_sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
         help="ICE: Gasoline engine | HEV: Self-charging hybrid | PHEV: Plug-in hybrid with battery reserve | EV: Pure battery electric."
     )
 
-    # 3. Vehicle Class Filter
+    # 4. Vehicle Class Filter
     available_classes = sorted(df["vehicle_class"].dropna().unique().tolist())
     selected_classes = st.sidebar.multiselect(
         "Vehicle Class Filter",
         options=available_classes,
         default=available_classes,
-        help="Filter by duty class (Car, SUV, Van)."
+        help="Filter by duty class (Car, SUV, Van, Unspecified)."
     )
 
-    filtered_df = df[
+    # Apply all filter conditions
+    mask = (
         (df["season_category"].isin(selected_seasons)) &
         (df["engine_type"].isin(selected_powertrains)) &
         (df["vehicle_class"].isin(selected_classes))
-    ]
+    )
+    if start_date and end_date:
+        mask &= (trip_dates >= start_date) & (trip_dates <= end_date)
+
+    filtered_df = df[mask]
+
+
 
     st.sidebar.divider()
-    st.sidebar.caption(
-        f"**Active Slice**: `{len(filtered_df):,}` / `{len(df):,}` trips "
-        f"({filtered_df['veh_id'].nunique()} active vehicles)"
-    )
+    st.sidebar.markdown(f"**Active Slice:** :blue-background[**{len(filtered_df):,}**] / **{len(df):,}** trips")
+    st.sidebar.markdown(f"**Active Assets:** :green-background[**{filtered_df['veh_id'].nunique()}**] vehicles")
 
     return filtered_df
 
 
 # -------------------------------------- #
-# Header & Executive KPI Cards
+# Executive KPI Cards
 # -------------------------------------- #
-def render_page_header():
-    head_left, head_right = st.columns([0.80, 0.20])
-    with head_left:
-        st.title("Fleet Electrification & Operational Efficiency")
-        st.caption(
-            "Enterprise analytics verifying Total Cost of Ownership (TCO), "
-            "carbon reduction baselines, and powertrain thermodynamic performance."
-        )
-    with head_right:
-        st.markdown(
-            '<div style="text-align: right; padding-top: 14px;"><span class="header-tag">EXECUTIVE TCO</span></div>',
-            unsafe_allow_html=True
-        )
-    st.divider()
-
 
 def render_kpi_summary_cards(filtered_df: pd.DataFrame):
     st.markdown("#### Executive KPI Summary Cards")
@@ -249,29 +288,273 @@ def render_kpi_summary_cards(filtered_df: pd.DataFrame):
     co2_val_str = f"{tot_co2_kg / 1000:,.2f} MT" if tot_co2_kg >= 1000 else f"{tot_co2_kg:,.1f} kg"
     avoided_val_str = f"{tot_avoided_kg / 1000:,.2f} MT" if tot_avoided_kg >= 1000 else f"{tot_avoided_kg:,.1f} kg"
 
-    kpis = [
-        ("Total Distance Traveled", f"{tot_distance:,.0f} km", "Cumulative odometer distance", "RIEMANN", "#2563EB"),
-        ("Total Fuel Consumed", f"{tot_fuel:,.1f} L", "Net gasoline consumed", "PID/MAF", "#0891B2"),
-        ("Total Grid Energy", f"{tot_elec:,.1f} kWh", "Net electrical traction draw", "BATTERY", "#10B981"),
-        ("Total Fleet Energy Cost", f"${tot_cost:,.2f}", "Dynamic point-in-time expenditure", "TARIFF", "#D97706"),
-        ("Total Carbon Emissions", co2_val_str, "Scope 1 & 2 emissions", "SCOPE 1+2", "#DC2626"),
-        ("CO₂ Emissions Avoided", avoided_val_str, "Net emissions offset vs ICE", "DISPLACED", "#7C3AED"),
-    ]
+    # Row 1: Physical Telemetry Operations
+    r1_c1, r1_c2, r1_c3 = st.columns(3, gap="medium")
+    with r1_c1:
+        render_kpi_card("Total Distance Traveled",f"{tot_distance:,.0f} km","Cumulative odometer distance", "#2563EB",)
+    with r1_c2:
+        render_kpi_card("Total Fuel Consumed", f"{tot_fuel:,.1f} L", "Net gasoline consumed","#0891B2",)
+    with r1_c3:
+        render_kpi_card( "Total Grid Energy",f"{tot_elec:,.1f} kWh", "Net electrical traction draw", "#10B981",)
 
-    cols = st.columns(6)
-    for col, (label, val, subtext, tag, color) in zip(cols, kpis):
-        with col:
-            render_kpi_card(label, val, subtext, tag, color)
+    st.write("") 
+
+    # Row 2: Financial & Carbon Impact
+    r2_c1, r2_c2, r2_c3 = st.columns(3, gap="medium")
+    with r2_c1:
+        render_kpi_card("Total Fleet Energy Cost", f"${tot_cost:,.2f}", "Dynamic point-in-time expenditure", "#D97706",)
+    with r2_c2:
+        render_kpi_card("Total Carbon Emissions", co2_val_str, "Scope 1 & 2 emissions", "#DC2626",)
+    with r2_c3:
+        render_kpi_card("CO₂ Emissions Avoided", avoided_val_str, "Net emissions offset vs ICE", "#7C3AED",)
 
     st.write("")
 
 
 # -------------------------------------- #
-# Main Application Logic
+# Tab 1: Cost & Energy Intensity
 # -------------------------------------- #
+def render_tco_benchmark_tab(filtered_df: pd.DataFrame):
+    tco_summary = filtered_df.groupby("engine_type").agg(
+        Trips=("trip_id", "count"),
+        Distance_km=("distance_km", "sum"),
+        Total_Cost_USD=("total_cost_usd", "sum"),
+        Fuel_Liters=("fuel_consumed_liters", "sum"),
+        Grid_kWh=("energy_consumed_kwh", "sum"),
+        CO2_kg=("co2_emissions_kg", "sum"),
+        CO2_Avoided_kg=("co2_avoided_kg", "sum")
+    ).reset_index()
+
+    # Calculate normalized intensities per 100 km
+    tco_summary["Cost_Per_100km"] = (
+        tco_summary["Total_Cost_USD"] / tco_summary["Distance_km"].replace(0, np.nan)
+    ) * 100
+    tco_summary["Fuel_Per_100km"] = (
+        tco_summary["Fuel_Liters"] / tco_summary["Distance_km"].replace(0, np.nan)
+    ) * 100
+    tco_summary["kWh_Per_100km"] = (
+        tco_summary["Grid_kWh"] / tco_summary["Distance_km"].replace(0, np.nan)
+    ) * 100
+
+    tco_summary = tco_summary.fillna(0.0)
+
+    # Order rows logically
+    powertrain_order = ["ICE", "HEV", "PHEV", "EV"]
+    tco_summary["sort_order"] = tco_summary["engine_type"].map(lambda x: powertrain_order.index(x) if x in powertrain_order else 99)
+    tco_summary = tco_summary.sort_values("sort_order").drop(columns=["sort_order"])
+
+    col_chart1, col_chart2 = st.columns(2, gap="large")
+
+    with col_chart1:
+        st.markdown("##### Fleet Operating Cost (dollars per 100 km)")
+        fig_cost = px.bar(
+            tco_summary,
+            x="engine_type",
+            y="Cost_Per_100km",
+            color="engine_type",
+            color_discrete_map=POWERTRAIN_COLORS,
+            labels={"engine_type": "Powertrain", "Cost_Per_100km": "Operating Cost ($/100 km)"}
+        )
+
+        # Add downward line overlay across the tops of the bars
+        fig_cost.add_trace(
+            go.Scatter(
+                x=tco_summary["engine_type"],
+                y=tco_summary["Cost_Per_100km"],
+                mode="lines+markers",
+                name="Cost Trend",
+                line=dict(color="#F59E0B", width=3, shape="spline"),
+                marker=dict(size=8, color="#FBBF24")
+            )
+        )
+
+        fig_cost.update_layout(
+            showlegend=False,
+            height=340,
+            margin=dict(l=20, r=20, t=30, b=30),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(title="", showgrid=False),
+            yaxis=dict(title="USD ($) per 100 km", showgrid=True, gridcolor="rgba(83, 208, 255, 0.34)"),
+            font=dict(family="Inter, sans-serif")
+        )
+        
+        # Ensure value labels only appear on the bars (not duplicated on the line markers)
+        fig_cost.update_traces(
+            selector=dict(type="bar"),
+            texttemplate="$%{y:.2f}",
+            textposition="outside"
+        )
+        st.plotly_chart(fig_cost, use_container_width=True)
+
+    with col_chart2:
+        st.markdown("##### Fuel & Energy Intensity per 100 km")
+        fig_intensity = go.Figure()
+        
+        # Fuel Intensity bar (L / 100 km)
+        fig_intensity.add_trace(go.Bar(
+            name="Fuel Intensity (L/100 km)",
+            x=tco_summary["engine_type"],
+            y=tco_summary["Fuel_Per_100km"],
+            marker_color="#D97706",
+            text=[f"{v:.1f} L" if v > 0 else "" for v in tco_summary["Fuel_Per_100km"]],
+            textposition="outside"
+        ))
+
+        # Electric Intensity bar (kWh / 100 km)
+        fig_intensity.add_trace(go.Bar(
+            name="Grid Intensity (kWh/100 km)",
+            x=tco_summary["engine_type"],
+            y=tco_summary["kWh_Per_100km"],
+            marker_color="#10B981",
+            text=[f"{v:.1f} kWh" if v > 0 else "" for v in tco_summary["kWh_Per_100km"]],
+            textposition="outside"
+        ))
+
+        fig_intensity.update_layout(
+            barmode="group",
+            height=340,
+            margin=dict(l=20, r=20, t=30, b=30),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(title="", showgrid=False),
+            yaxis=dict(title="Consumption per 100 km", showgrid=True, gridcolor="rgba(83, 208, 255, 0.34)"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            font=dict(family="Inter, sans-serif")
+        )
+        st.plotly_chart(fig_intensity, use_container_width=True)
+
+    # ROI Takeaway & Tabular Rollup
+    st.info(
+        "💡 **Business Takeaway**: Explores the return on investment (ROI) of fleet electrification by "
+        "demonstrating that pure electric (EV) and plug-in hybrid (PHEV) assets operate at a substantial "
+        "discount per kilometer compared to conventional internal combustion engines (ICE)."
+    )
+
+    st.markdown("##### Powertrain Performance Rollup")
+    display_table = tco_summary.rename(columns={
+        "engine_type": "Powertrain",
+        "Distance_km": "Total Distance (km)",
+        "Total_Cost_USD": "Total Cost ($)",
+        "Cost_Per_100km": "Cost / 100km ($)",
+        "Fuel_Per_100km": "Fuel / 100km (L)",
+        "kWh_Per_100km": "Grid / 100km (kWh)",
+        "CO2_kg": "Gross CO₂ (kg)",
+        "CO2_Avoided_kg": "Net CO₂ Avoided (kg)"
+    })
+    st.dataframe(
+        display_table.style.format({
+            "Total Distance (km)": "{:,.1f}",
+            "Total Cost ($)": "${:,.2f}",
+            "Cost / 100km ($)": "${:,.2f}",
+            "Fuel / 100km (L)": "{:,.2f}",
+            "Grid / 100km (kWh)": "{:,.2f}",
+            "Gross CO₂ (kg)": "{:,.1f}",
+            "Net CO₂ Avoided (kg)": "{:,.1f}"
+        }),
+        use_container_width=True
+    )
+
+
+# -------------------------------------- #
+# Tab 2: Operational Waste Breakdown (Idling vs Driving)
+# # -------------------------------------- #
+
+def render_operational_waste_tab(filtered_df: pd.DataFrame):
+    tot_duration_mins = filtered_df["duration_minutes"].sum()
+    tot_idling_mins = filtered_df["idling_duration_minutes"].sum()
+    tot_fuel_liters = filtered_df["fuel_consumed_liters"].sum()
+    tot_cost_usd = filtered_df["total_cost_usd"].sum()
+
+    # Approximate idling waste ratio based on idling time vs trip duration
+    trip_idle_ratio = (
+        filtered_df["idling_duration_minutes"] / filtered_df["duration_minutes"].replace(0, np.nan)
+    ).clip(0.0, 0.85).fillna(0.0)
+
+    # Calculate Wasted Idling Fuel and Productive Fuel
+    wasted_fuel_liters = (filtered_df["fuel_consumed_liters"] * trip_idle_ratio).sum()
+    productive_fuel_liters = max(0.0, tot_fuel_liters - wasted_fuel_liters)
+
+    # Calculate Capital Lost to Idling
+    capital_lost_usd = (filtered_df["total_cost_usd"] * trip_idle_ratio).sum()
+
+    idle_time_pct = (tot_idling_mins / max(1.0, tot_duration_mins)) * 100
+    idle_fuel_pct = (wasted_fuel_liters / max(0.001, tot_fuel_liters)) * 100 if tot_fuel_liters > 0 else 0.0
+
+    col_donut, col_callouts = st.columns([0.55, 0.45], gap="large")
+
+    with col_donut:
+        st.markdown("##### Fuel Allocation: Productive Driving vs. Stationary Idling")
+        
+        donut_data = pd.DataFrame({
+            "Category": ["Productive Driving Fuel", "Wasted Idling Fuel"],
+            "Liters": [productive_fuel_liters, wasted_fuel_liters]
+        })
+
+        fig_donut = px.pie(
+            donut_data,
+            names="Category",
+            values="Liters",
+            hole=0.62,
+            color="Category",
+            color_discrete_map={
+                "Productive Driving Fuel": "#0EA5E9",  # Deep Navy Theme Bright Blue
+                "Wasted Idling Fuel": "#F59E0B"        # Amber/Orange Warning
+            }
+        )
+        fig_donut.update_layout(
+            height=340,
+            margin=dict(l=10, r=10, t=10, b=10),
+            paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5),
+            font=dict(family="Inter, sans-serif", color="#E2E8F0")
+        )
+        fig_donut.update_traces(
+            textinfo="percent+value",
+            texttemplate="%{value:,.1f} L<br>(%{percent})",
+            hoverinfo="label+value+percent"
+        )
+        st.plotly_chart(fig_donut, use_container_width=True)
+
+    with col_callouts:
+        st.markdown("##### Financial & Delay Impact")
+        
+        st.markdown(
+            f"""
+            <div class="kpi-card" style="border-left: 4px solid #EF4444; margin-bottom: 16px;">
+                <div style="display: flex; flex-direction: column; align-items: flex-start; gap: 8px;">
+                    <span class="kpi-badge" style="background-color: rgba(239, 68, 68, 0.15); color: #EF4444; border: 1px solid rgba(239, 68, 68, 0.3);">CAPITAL IMPACT</span>
+                    <div class="kpi-label" style="margin-top: 4px;">Capital Lost to Idling</div>
+                </div>
+                <div class="kpi-value" style="margin-top: 8px;">${capital_lost_usd:,.2f}</div>
+                <div class="kpi-subtext">Direct operational budget lost to zero-speed combustion stops.</div>
+            </div>
+
+            <div class="kpi-card" style="border-left: 4px solid #F59E0B;">
+                <div style="display: flex; flex-direction: column; align-items: flex-start; gap: 8px;">
+                    <span class="kpi-badge" style="background-color: rgba(245, 158, 11, 0.15); color: #F59E0B; border: 1px solid rgba(245, 158, 11, 0.3);">OPERATIONAL DELAY</span>
+                    <div class="kpi-label" style="margin-top: 4px;">Total Idling Duration</div>
+                </div>
+                <div class="kpi-value" style="margin-top: 8px;">{tot_idling_mins / 60:,.1f} Hours</div>
+                <div class="kpi-subtext">Represents <strong>{idle_time_pct:.1f}%</strong> of total fleet engine run-time.</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    st.warning(
+        "🛑 **Takeaway**: Surfaces unmonitored capital loss from auxiliary stops, staging queues, "
+        "and driver habits. Implementing fleet anti-idling policies or electric start-stop technology "
+        f"may directly reclaim up to **${capital_lost_usd:,.2f}** and **{wasted_fuel_liters:,.1f} Liters** of wasted fuel."
+    )
+
+
+# -------------------------------------- #
+# Main
+# -------------------------------------- #
+
 if __name__ == "__main__":
     apply_page_styles()
-    render_page_header()
 
     try:
         raw_df = load_fact_trips_data()
@@ -289,3 +572,20 @@ if __name__ == "__main__":
         st.stop()
 
     render_kpi_summary_cards(filtered_df)
+
+    #st.divider()
+
+    # Three analytical serving tabs
+    tab_tco, tab_waste, tab_climate = st.tabs([
+        "Powertrain Benchmark (Cost & Energy)",
+        "Operational Waste (Idling vs Driving)",
+        "Seasonal Weather & Climate Impact"
+    ])
+
+
+    with tab_tco:
+        render_tco_benchmark_tab(filtered_df)
+
+    with tab_waste:
+        render_operational_waste_tab(filtered_df)
+
