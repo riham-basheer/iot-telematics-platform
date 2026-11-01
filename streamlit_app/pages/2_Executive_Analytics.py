@@ -456,15 +456,16 @@ def render_tco_benchmark_tab(filtered_df: pd.DataFrame):
     )
 
 
-# -------------------------------------- #
+# -------------------------------------------------------- #
 # Tab 2: Operational Waste Breakdown (Idling vs Driving)
-# # -------------------------------------- #
+# # ------------------------------------------------------ #
 
 def render_operational_waste_tab(filtered_df: pd.DataFrame):
     tot_duration_mins = filtered_df["duration_minutes"].sum()
     tot_idling_mins = filtered_df["idling_duration_minutes"].sum()
     tot_fuel_liters = filtered_df["fuel_consumed_liters"].sum()
-    tot_cost_usd = filtered_df["total_cost_usd"].sum()
+
+    #tot_cost_usd = filtered_df["total_cost_usd"].sum()
 
     # Approximate idling waste ratio based on idling time vs trip duration
     trip_idle_ratio = (
@@ -498,7 +499,7 @@ def render_operational_waste_tab(filtered_df: pd.DataFrame):
             hole=0.62,
             color="Category",
             color_discrete_map={
-                "Productive Driving Fuel": "#0EA5E9",  # Deep Navy Theme Bright Blue
+                "Productive Driving Fuel": "#0187C5",  # Deep Navy Theme Bright Blue
                 "Wasted Idling Fuel": "#F59E0B"        # Amber/Orange Warning
             }
         )
