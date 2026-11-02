@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 import glob
 import subprocess
@@ -11,6 +12,7 @@ RAW_DIR = "data/raw"
 # Sort all CSV files chronologically and slice the first 50 files for the historical backfill
 # This reserves the final files (e.g., Week 51/52) for the live streaming cutover simulation
 ALL_FILES = sorted(glob.glob(os.path.join(RAW_DIR, "VED_*_week.csv")))[:50]
+LOG_FILE = "backfill_run.log"
 
 def get_pg_connection():
     return psycopg2.connect(
@@ -21,6 +23,11 @@ def get_pg_connection():
         port=os.getenv("DB_PORT", "5432")
     )
 
+def write_log(msg):
+    """Prints to terminal and writes to a log file"""
+    print(msg)
+    with open(LOG_FILE, "a") as f:
+        f.write(msg + "\n")
 
 def get_processed_files():
     """Retrieve the list of successfully processed CSVs from PostgreSQL watermark."""
@@ -38,17 +45,18 @@ def get_total_gold_trip_count():
             return cur.fetchone()[0]
 
 def mark_file_processed(filename, rows_ingested, trips_generated):
-    """Log a successful batch completion to prevent reprocessing"""
+    """Log a successful batch completion to prevent reprocessing."""
     with get_pg_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO etl_processed_batches (file_name, batch_chunk_id, rows_ingested, trips_generated, status)
-                VALUES (%s, 'BACKFILL', 0, 0, 'SUCCESS')
+                VALUES (%s, 'BACKFILL', %s, %s, 'SUCCESS')
                 ON CONFLICT (file_name) DO UPDATE SET
                     rows_ingested = EXCLUDED.rows_ingested,
-                    treips_generated = EXCLUDED.trips_generated,
-                    status = 'SUCCESS', processed_at = CURRENT_TIMESTAMP;
-            """, (filename, rows_ingested, trips_generated))
+                    trips_generated = EXCLUDED.trips_generated,
+                    status = 'SUCCESS', 
+                    processed_at = CURRENT_TIMESTAMP;
+            """, (filename, int(rows_ingested), int(trips_generated)))        
 
 
 
@@ -59,17 +67,24 @@ def execute_pipeline(file_path):
 
     #1. get baseline trip count before processing
     baseline_trip_count = get_total_gold_trip_count()
-
+    
     #2. Calculate raw rows ingested from the CSV file (excluding headers)
     with open(file_path, 'r') as f:
-        rows_ingested = sum(1 for line in f) - 1  # Subtract 1 for the header row
+        rows_ingested = sum(1 for _ in f) - 1
+        
+    write_log(f"\n[RUNNING BRONZE->SILVER] {file_path}")
 
-    print(f"\n[RUNNING BRONZE -> SILVER] {file_path}")
-    subprocess.run(["python3", "src/batch/spark_bronze_to_silver.py", "--input-path", file_path], env=env, check=True)
-    
-    print(f"[RUNNING SILVER -> GOLD & UPSERT] {file_path}")
-    subprocess.run(["python3", "src/batch/spark_silver_to_gold.py", "--input-path", "data/silver/telemetry_enriched"], env=env, check=True)
+    week_id = os.path.basename(file_path).replace(".csv", "")
+    week_silver_path = f"data/silver/telemetry_enriched/*/*/batch_week={week_id}" 
+    with open(LOG_FILE, "a") as log_f:
+        subprocess.run(["python3", "src/batch/spark_bronze_to_silver.py", "--input-path", file_path], env=env, check=True, stdout=log_f, stderr=subprocess.STDOUT)
 
+    write_log(f"[RUNNING SILVER->GOLD & UPSERT] {file_path}")
+    with open(LOG_FILE, "a") as log_f:
+        # Pass week_silver_path instead of the entire Silver directory
+        subprocess.run(["python3", "src/batch/spark_silver_to_gold.py", "--input-path", week_silver_path], env=env, check=True, stdout=log_f, stderr=subprocess.STDOUT)
+
+        
     #3. query gold layer after processing to get the new trip count
     new_trip_count = get_total_gold_trip_count()
     trips_generated = new_trip_count - baseline_trip_count
@@ -81,20 +96,27 @@ def run_chunked_backfill(chunk_size=3):
     pending = [f for f in ALL_FILES if os.path.basename(f) not in processed]
     
     if not pending:
-        print("Lakehouse is fully up to date! No pending weeks to process.)")
+        if not pending:
+            write_log("Lakehouse is fully up to date! No pending weeks to process.")
         return
 
     chunk = pending[:chunk_size]
-    print(f"\n-- Initiating backfill for {len(chunk)} files (Total remaining: {len(pending)})...\n")
+    write_log(f"\n-- Initiating backfill for {len(chunk)} files (Total remaining: {len(pending) - len(chunk)})...\n")
     
+
     for file_path in chunk:
         filename = os.path.basename(file_path)
+
+        date_str = filename.split('_')[1] 
+        readable_date = datetime.strptime(date_str, "%y%m%d").strftime("%B %d, %Y")
+                
+        write_log(f"📅 Processing Week of: {readable_date} (File: {filename})")
         try:
             rows_ingested, trips_generated = execute_pipeline(file_path)
             mark_file_processed(filename, rows_ingested, trips_generated)
-            print(f"--- SUCCESSFULLY INGESTED AND UPSERTED: {filename} ({rows_ingested} raw rows -> {trips_generated} gold trips)")
+            write_log(f"--- SUCCESSFULLY INGESTED AND UPSERTED: {filename} ({rows_ingested} raw rows -> {trips_generated} gold trips)")
         except subprocess.CalledProcessError as e:
-            print(f"--- PIPELINE FAILED ON: {filename}. Stopping chunk run to preserve state.")
+            write_log(f"--- PIPELINE FAILED ON: {filename}. Stopping chunk run to preserve state.")
             break
 
 if __name__ == "__main__":
