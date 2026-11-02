@@ -8,7 +8,7 @@ import pyarrow.parquet as pq
 LATITUDE = 42.2713
 LONGITUDE = -83.7255
 START_DATE = "2017-11-01"
-END_DATE = "2018-06-13"
+END_DATE = "2018-10-30"
 
 OUTPUT_DIR = "data/bronze/weather/historical_bulk"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "weather_ann_arbor_2017_2018.parquet")
@@ -50,7 +50,7 @@ def fetch_and_cache_historical_weather():
     pq.write_table(table, OUTPUT_FILE, compression="snappy")
 
     file_size_kb = os.path.getsize(OUTPUT_FILE) / 1024
-    print(f" Cached bronze Parquet to: {OUTPUT_FILE} ({file_size_kb:.2f} KB)")
+    print(f"-- Cached bronze Parquet to: {OUTPUT_FILE} ({file_size_kb:.2f} KB)")
 
 if __name__ == "__main__":
     fetch_and_cache_historical_weather()
