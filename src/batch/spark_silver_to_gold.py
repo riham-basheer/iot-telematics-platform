@@ -7,12 +7,16 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 from pyspark.sql.types import (LongType)
+from psycopg2.extras import execute_batch
+import glob
+
 
 # Add project root directory to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-from src.utils.db_connection import get_db_engine
+
+from src.utils.db_connection import get_db_engine, get_db_cursor
 
 # Automotive Constants for Gasoline Stoichiometry
 GASOLINE_AIR_FUEL_RATIO = 14.7
@@ -27,6 +31,7 @@ def get_spark_session(app_name="VED_Silver_to_Gold"):
         .config("spark.sql.session.timeZone", "UTC") \
         .config("spark.driver.memory", "4g") \
         .config("spark.sql.shuffle.partitions", "8") \
+        .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
         .getOrCreate()
 
 
@@ -77,6 +82,7 @@ def compute_trip_physics(df):
     - High-voltage battery energy (kWh)
     - Cabin climate HVAC energy (kWh)
     """
+    
     trip_window = Window.partitionBy("vehid", "trip").orderBy("timestamp_ms")
 
     # 1. Delta t in seconds between successive pings .. if gap is more than 30 ot negative, drop
@@ -150,7 +156,7 @@ def compute_trip_physics(df):
                  .withColumn("has_batt", has_battery_reading)
 
     # 8. Trip Aggregations (Gold Rollup)
-    trip_summary = df_steps.groupBy("vehid", "trip").agg(
+    trip_summary = df_steps.groupBy("vehid", "trip", "batch_week").agg(
         F.min("event_time").alias("trip_start_time"),
         F.max("event_time").alias("trip_end_time"),
         F.round(F.sum("delta_t_s") / 60.0, 2).alias("duration_minutes"),
@@ -282,23 +288,69 @@ def enrich_with_scd2_costing_and_esg(trips_df, pricing_df, vehicle_df=None):
         total_co2.alias("co2_emissions_kg"),
         avoided_co2.alias("co2_avoided_kg"),
         F.col("avg_ambient_temp_c"),
-        F.col("avg_hvac_power_watts")
+        F.col("avg_hvac_power_watts"),
+        F.col("batch_week")
     )
 
     return gold_df
 
 
+def sync_gold_to_postgres(gold_df):
+    """Idempotently upserts Gold trips into PostgreSQL fact_trips_summary."""
+    
+    print("5. Syncing Gold metrics to PostgreSQL fact_trips_summary...")
+    pdf = gold_df.toPandas()
+    rows = [tuple(x) for x in pdf.to_numpy()]
+
+    upsert_sql = """
+        INSERT INTO fact_trips_summary (
+            trip_id, veh_id, engine_type, season_category, trip_start_time, trip_end_time,
+            duration_minutes, distance_km, avg_speed_kmh, idling_duration_minutes,
+            fuel_consumed_liters, energy_consumed_kwh, total_cost_usd,
+            co2_emissions_kg, co2_avoided_kg, avg_ambient_temp_c, avg_hvac_power_watts
+        ) VALUES (
+            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+        )
+        ON CONFLICT (trip_id) DO UPDATE SET
+            veh_id = EXCLUDED.veh_id,
+            engine_type = EXCLUDED.engine_type,
+            season_category = EXCLUDED.season_category,
+            trip_start_time = EXCLUDED.trip_start_time,
+            trip_end_time = EXCLUDED.trip_end_time,
+            duration_minutes = EXCLUDED.duration_minutes,
+            distance_km = EXCLUDED.distance_km,
+            avg_speed_kmh = EXCLUDED.avg_speed_kmh,
+            idling_duration_minutes = EXCLUDED.idling_duration_minutes,
+            fuel_consumed_liters = EXCLUDED.fuel_consumed_liters,
+            energy_consumed_kwh = EXCLUDED.energy_consumed_kwh,
+            total_cost_usd = EXCLUDED.total_cost_usd,
+            co2_emissions_kg = EXCLUDED.co2_emissions_kg,
+            co2_avoided_kg = EXCLUDED.co2_avoided_kg,
+            avg_ambient_temp_c = EXCLUDED.avg_ambient_temp_c,
+            avg_hvac_power_watts = EXCLUDED.avg_hvac_power_watts;
+    """
+
+    with get_db_cursor(commit=True) as cur:
+        execute_batch(cur, upsert_sql, rows, page_size=1000)
+
+    print(f"-- Successfully synced {len(rows):,} trips into PostgreSQL fact_trips_summary.")
+
 def run_silver_to_gold_pipeline(input_path, output_path):
     spark = get_spark_session()
 
     print(f"\n1. Ingesting Silver lakehouse from: {input_path}")
-    if not os.path.exists(input_path):
+    if not glob.glob(input_path):
         print(f"ERROR: Input path {input_path} does not exist. Please run the Silver ingestion first.")
         sys.exit(1)
     else:
         silver_df = spark.read.parquet(input_path)
+        
+    # Extract batch_week directly from the input_path argument
+    batch_week = input_path.split("=")[-1] if "=" in input_path else "UNKNOWN"
+    silver_df = silver_df.withColumn("batch_week", F.lit(batch_week))
 
     print("2. Integrating physical sensor streams (Riemann sums & idling detection)...")
+
     trips_base = compute_trip_physics(silver_df)
 
     print("3. Matching SCD Type 2 tariffs and calculating ESG benchmarks...")
@@ -307,19 +359,23 @@ def run_silver_to_gold_pipeline(input_path, output_path):
     gold_df = enrich_with_scd2_costing_and_esg(trips_base, pricing_df, vehicle_df)
 
     print(f"4. Writing Gold Lakehouse Parquet to: {output_path}")
-    gold_df.write.mode("overwrite").parquet(output_path)
+    gold_df.write.mode("overwrite").partitionBy("batch_week").parquet(output_path)
+
+    sync_gold_to_postgres(gold_df.drop("batch_week"))
+    
 
     total_trips = gold_df.count()
     print(f"\n-- Gold Ingestion Complete: {total_trips:,} trips materialized --")
 
-    print("\n--- Powertrain Distribution in Gold Dataset ---")
-    gold_df.groupBy("engine_type").count().show()
+    #print("\n--- Powertrain Distribution in Gold Dataset ---")
+    #gold_df.groupBy("engine_type").count().show()
 
-    print("\n--- Sample fact_trips_summary (Financial & Environmental Bottom Line) ---")
-    gold_df.select(
-        "trip_id", "veh_id", "engine_type", "season_category", 
-        "distance_km", "duration_minutes", "total_cost_usd", "co2_emissions_kg", "co2_avoided_kg"
-    ).show(5, truncate=False)
+    #print("\n--- Sample fact_trips_summary (Financial & Environmental Bottom Line) ---")
+    #gold_df.select(
+    #    "trip_id", "veh_id", "engine_type", "season_category", 
+    #    "distance_km", "duration_minutes", "total_cost_usd", "co2_emissions_kg", "co2_avoided_kg"
+    #).show(5, truncate=False)
+
 
     spark.stop()
 
