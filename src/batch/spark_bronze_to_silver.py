@@ -22,6 +22,7 @@ def get_spark_session(app_name="VED_Bronze_to_Silver"):
         .config("spark.sql.session.timeZone", "UTC") \
         .config("spark.driver.memory", "4g") \
         .config("spark.sql.shuffle.partitions", "8") \
+        .config("spark.sql.sources.partitionOverwriteMode", "dynamic") \
         .getOrCreate()
 
 
@@ -185,11 +186,14 @@ def run_bronze_to_silver_pipeline(input_path, output_path, parquet_weather_path=
     print("3. Joining local weather cache...")
     df_silver = join_offline_weather(df_silver, parquet_weather_path, spark)
 
+    week_id = os.path.basename(input_path).replace(".csv", "")
     df_silver = df_silver.withColumn("year", F.year(F.col("event_time"))) \
-                         .withColumn("month", F.format_string("%02d", F.month("event_time")))
+                         .withColumn("month", F.format_string("%02d", F.month("event_time"))) \
+                         .withColumn("batch_week", F.lit(week_id))
 
     print(f"4. Writing transformed silver parquet partitioned by year/month to: {output_path}")
-    df_silver.write.mode("overwrite").partitionBy("year", "month").parquet(output_path)
+    # Change mode("overwrite") -> mode("append")
+    df_silver.write.mode("overwrite").partitionBy("year", "month", "batch_week").parquet(output_path)
 
     print(f"\n--- YAY! Bronze to Silver Transformation is complete. Total rows: {df_silver.count()} ----")
 
