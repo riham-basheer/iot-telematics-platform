@@ -9,6 +9,9 @@ from dotenv import find_dotenv, load_dotenv
 load_dotenv(find_dotenv())
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
+if os.path.exists("/opt/airflow") and DB_HOST in ("localhost", "127.0.0.1", "::1"):
+    # Inside Docker container, route DB_HOST to the postgres container
+    DB_HOST = "postgres"
 DB_NAME = os.getenv("DB_NAME", "telematics_dwh")
 DB_USER = os.getenv("DB_USER", "airflow")
 DB_PASS = os.getenv("DB_PASSWORD", "airflow")
