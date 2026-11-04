@@ -8,7 +8,7 @@ import pyarrow.parquet as pq
 LATITUDE = 42.2713
 LONGITUDE = -83.7255
 START_DATE = "2017-11-01"
-END_DATE = "2018-10-30"
+END_DATE = "2018-10-23"
 
 OUTPUT_DIR = "data/bronze/weather/historical_bulk"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "weather_ann_arbor_2017_2018.parquet")
