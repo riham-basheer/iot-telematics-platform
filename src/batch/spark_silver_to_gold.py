@@ -6,7 +6,7 @@ from pathlib import Path
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
-from pyspark.sql.types import (LongType)
+from pyspark.sql.types import (LongType, StringType, DoubleType, TimestampType, StructType, StructField, IntegerType)
 from psycopg2.extras import execute_batch
 import glob
 
@@ -37,25 +37,48 @@ def get_spark_session(app_name="VED_Silver_to_Gold"):
 
 def get_scd2_energy_pricing_df(spark):
     """
-    dimension ((dim_energy_pricing_history))
-    it matches the EIA Michigan benchmark tarrifs accross temporal validity windows
+    Reads the SCD Type 2 pricing dimension directly from PostgreSQL.
     """
     query = """
-        SELECT energy_type, price_per_unit, co2_kg_per_unit, valid_from, valid_to 
+        SELECT 
+            energy_type, 
+            CAST(price_per_unit AS DOUBLE PRECISION) AS price_per_unit, 
+            CAST(co2_kg_per_unit AS DOUBLE PRECISION) AS co2_kg_per_unit, 
+            valid_from, 
+            valid_to 
         FROM dim_energy_pricing_history;
     """
-    pdf = pd.read_sql(query, con=get_db_engine())
-    return spark.createDataFrame(pdf)
+    with get_db_cursor() as cur:
+        cur.execute(query)
+        rows = cur.fetchall()
 
+    schema = StructType([
+        StructField("energy_type", StringType(), False),
+        StructField("price_per_unit", DoubleType(), False),
+        StructField("co2_kg_per_unit", DoubleType(), False),
+        StructField("valid_from", TimestampType(), True),
+        StructField("valid_to", TimestampType(), True)
+    ])
+    return spark.createDataFrame(rows, schema=schema)
 
 def get_dim_vehicle_df(spark):
     """
     Loads authoritative vehicle metadata from PostgreSQL dim_vehicle
     to preserve true powertrain classifications (ICE, HEV, PHEV, EV).
     """
-    query = "SELECT veh_id, engine_type FROM dim_vehicle;"
-    pdf = pd.read_sql(query, con=get_db_engine())
-    return spark.createDataFrame(pdf)
+    query = """
+        SELECT veh_id, engine_type 
+        FROM dim_vehicle;
+    """
+    with get_db_cursor() as cur:
+        cur.execute(query)
+        rows = cur.fetchall()
+
+    schema = StructType([
+        StructField("veh_id", IntegerType(), False),
+        StructField("engine_type", StringType(), False)
+    ])
+    return spark.createDataFrame(rows, schema=schema)
 
 
 def compute_trip_physics(df):
