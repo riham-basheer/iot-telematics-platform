@@ -213,3 +213,45 @@ def test_gold_parquet_storage_exists():
 
     assert os.path.exists(gold_dir), f"Directory {gold_dir} does not exist!"
     assert len(parquet_files) > 0, f"No Parquet partition files found in {gold_dir}!"
+
+
+# ==============================================================================
+# 6. Spatial Infrastructure & Page 3 Serving Audits
+# ==============================================================================
+
+def test_spatial_hotspots_and_chargers_integrity(pg_conn):
+    """
+    Asserts Page 3 serving tables (fact_spatial_hotspots & dim_charging_stations)
+    are populated and obey Ann Arbor GPS bounds and non-negative metric invariants.
+    """
+    with pg_conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM fact_spatial_hotspots;")
+        hotspot_count = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM fact_spatial_hotspots
+            WHERE cluster_latitude < 42.0 OR cluster_latitude > 42.5
+               OR cluster_longitude < -84.0 OR cluster_longitude > -83.5
+               OR total_idling_events <= 0
+               OR total_idling_hours <= 0.0
+               OR wasted_fuel_liters < 0.0
+               OR wasted_cost_usd < 0.0;
+        """)
+        invalid_hotspots = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM dim_charging_stations;")
+        station_count = cur.fetchone()[0]
+
+    assert hotspot_count > 0, "fact_spatial_hotspots table is empty!"
+    assert invalid_hotspots == 0, f"Found {invalid_hotspots} spatial hotspots violating GPS or metric bounds."
+    assert station_count > 0, "dim_charging_stations table is empty!"
+
+
+def test_spatial_gold_parquet_exists():
+    """Asserts that Gold Parquet files exist on disk for fact_spatial_hotspots."""
+    spatial_dir = os.path.join(str(PROJECT_ROOT), "data/gold/fact_spatial_hotspots")
+    parquet_files = glob.glob(os.path.join(spatial_dir, "**", "*.parquet"), recursive=True)
+
+    assert os.path.exists(spatial_dir), f"Directory {spatial_dir} does not exist!"
+    assert len(parquet_files) > 0, f"No Parquet files found in {spatial_dir}!"
