@@ -201,7 +201,8 @@ def render_sidebar_filters(df: pd.DataFrame) -> pd.DataFrame:
     st.sidebar.markdown("### Fleet Slicers")
 
     # 1. Calendar Date Range Picker
-    trip_dates = pd.to_datetime(df["trip_start_time"]).dt.date
+    
+    trip_dates = pd.to_datetime(df["trip_start_time"], format="ISO8601", utc=True).dt.date
     min_date = trip_dates.min()
     max_date = trip_dates.max()
 
