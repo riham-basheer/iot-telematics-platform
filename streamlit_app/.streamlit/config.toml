@@ -1,7 +1,7 @@
 [theme]
-primaryColor = "#2563EB"
-font = "sans serif"
+base = "dark"
+backgroundColor = "#131722"
+secondaryBackgroundColor = "#1E2536"
 
 [client]
 toolbarMode = "developer"
-EOF
