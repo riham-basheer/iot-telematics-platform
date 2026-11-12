@@ -283,10 +283,13 @@ def enrich_with_scd2_costing_and_esg(trips_df, pricing_df, vehicle_df=None):
     # Season Category
     year = F.year("trip_start_time")
     month = F.month("trip_start_time")
-    season_cat = F.when(year == 2017, F.lit("FALL_2017")) \
-                  .when((year == 2018) & (month.isin(1, 2)), F.lit("WINTER_2018")) \
-                  .when((year == 2018) & (month.isin(3, 4, 5)), F.lit("SPRING_2018")) \
-                  .otherwise(F.lit("SUMMER_LIVE"))
+    season_cat = (
+        F.when((year == 2017) & (month == 11), F.lit("FALL_2017"))
+        .when(((year == 2017) & (month == 12)) | ((year == 2018) & (month.isin(1, 2))), F.lit("WINTER_2018"))
+        .when((year == 2018) & (month.isin(3, 4, 5)), F.lit("SPRING_2018"))
+        .when((year == 2018) & (month.isin(6, 7, 8)), F.lit("SUMMER_2018"))
+        .otherwise(F.lit("FALL_LIVE"))
+    )
 
     # Deterministic 64-bit BIGINT trip_id for database contract
     trip_hash = F.abs(F.hash(
