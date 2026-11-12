@@ -2,14 +2,25 @@
 set -euo pipefail
 
 echo "=================================================================="
-echo "      IOT Fleet Telematics Lakehouse — Automated Bootstrap"
+echo "      IOT Fleet Telematics Lakehouse — Automated Bootstrap "
 echo "=================================================================="
 
-# 1. Ensure AIRFLOW_UID is configured in .env
-if [ ! -f .env ] || ! grep -q "AIRFLOW_UID" .env; then
-    echo "AIRFLOW_UID=$(id -u)" >> .env
-    echo "[Done] Configured AIRFLOW_UID=$(id -u) in .env"
+# 1. Ensure .env exists (copy from .env.example if missing) & set AIRFLOW_UID
+if [ ! -f .env ]; then
+    if [ -f .env.example ]; then
+        cp .env.example .env
+        echo "[Done] Created .env from .env.example template."
+    else
+        touch .env
+    fi
 fi
+
+if ! grep -q "^AIRFLOW_UID=" .env; then
+    echo "AIRFLOW_UID=$(id -u)" >> .env
+else
+    sed -i "s/^AIRFLOW_UID=.*/AIRFLOW_UID=$(id -u)/" .env
+fi
+echo "[Done] Configured AIRFLOW_UID=$(id -u) in .env"
 
 # 2. Start PostgreSQL & Redis services
 echo "[1/6] Starting Docker Compose infrastructure..."
@@ -30,19 +41,27 @@ docker exec -i telematics-postgres psql -U airflow -d telematics_dwh < db/init_s
 docker exec -i telematics-postgres psql -U airflow -d airflow < db/init_schema.sql > /dev/null
 echo "[Done] Star Schema tables and indexes verified."
 
-# 4. Seed Dimension Tables
-echo "[3/6] Seeding Dimension Tables..."
-export PYTHONPATH=.
-if [ -f db/seed_dim_vehicle.py ]; then
-    python3 db/seed_dim_vehicle.py
+# 4. Load Warehouse Snapshot (if DB is empty) OR Run Dimension Seeders
+TRIP_COUNT=$(docker exec -i telematics-postgres psql -U airflow -d telematics_dwh -tc "SELECT COUNT(*) FROM fact_trips_summary;" | tr -d '[:space:]')
+
+if [ "$TRIP_COUNT" = "0" ] && [ -f "db/telematics_dwh_snapshot.sql.gz" ]; then
+    echo "[3/6] Loading pre-populated 50-week warehouse data from db/telematics_dwh_snapshot.sql.gz..."
+    gunzip -c db/telematics_dwh_snapshot.sql.gz | docker exec -i telematics-postgres psql -U airflow -d telematics_dwh > /dev/null
+    echo "[Done] Warehouse data loaded (trips, spatial hotspots, vehicles, tariffs, and stations)."
+else
+    echo "[3/6] Seeding Dimension Tables..."
+    export PYTHONPATH=.
+    if [ -f db/seed_dim_vehicle.py ]; then
+        python3 db/seed_dim_vehicle.py
+    fi
+    if [ -f db/seed_pricing_history.py ]; then
+        python3 db/seed_pricing_history.py
+    fi
+    if [ -f db/fetch_nrel_stations.py ]; then
+        python3 db/fetch_nrel_stations.py
+    fi
+    echo "[Done] Dimension tables seeded (dim_vehicle, dim_energy_pricing_history, dim_charging_stations)."
 fi
-if [ -f db/seed_pricing_history.py ]; then
-    python3 db/seed_pricing_history.py
-fi
-if [ -f db/fetch_nrel_stations.py ]; then
-    python3 db/fetch_nrel_stations.py
-fi
-echo "[Done] Dimension tables seeded (dim_vehicle, dim_energy_pricing_history, dim_charging_stations)."
 
 # 5. Ensure Historical Weather Cache Exists
 echo "[4/6] Checking Bronze Historical Weather Parquet Cache..."
@@ -53,14 +72,22 @@ else
     echo "[Done] Cached weather Parquet found at $WEATHER_CACHE"
 fi
 
-# 6. Audit PostgreSQL Gold Serving Layer
+
+# 6. Audit PostgreSQL Gold Serving Layer and Populate Spatial Hotspots if Needed
 echo "[5/6] Auditing PostgreSQL Gold Serving Layer..."
+HOTSPOT_COUNT=$(docker exec -i telematics-postgres psql -U airflow -d telematics_dwh -tc "SELECT COUNT(*) FROM fact_spatial_hotspots;" | tr -d '[:space:]')
+if [ "$HOTSPOT_COUNT" = "0" ] && [ -d "data/silver/telemetry_enriched" ]; then
+    echo "Populating Gold spatial hotspots for Page 3..."
+    python3 src/batch/spark_spatial_hotspots.py
+fi
+
 docker exec -i telematics-postgres psql -U airflow -d telematics_dwh -c "
 SELECT 
     (SELECT COUNT(*) FROM etl_processed_batches WHERE status = 'SUCCESS') AS weeks_processed,
     (SELECT COUNT(*) FROM dim_vehicle) AS fleet_vehicles,
     (SELECT COUNT(*) FROM dim_charging_stations) AS nrel_stations,
-    (SELECT COUNT(*) FROM fact_trips_summary) AS gold_trips_loaded;
+    (SELECT COUNT(*) FROM fact_trips_summary) AS gold_trips_loaded,
+    (SELECT COUNT(*) FROM fact_spatial_hotspots) AS spatial_hotspots;
 "
 
 # Start remaining Airflow services in background
