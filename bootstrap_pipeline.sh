@@ -55,10 +55,10 @@ else
         python3 db/seed_dim_vehicle.py
     fi
     if [ -f db/seed_pricing_history.py ]; then
-        python3 db/seed_pricing_history.py
+        python3 db/seed_pricing_history.py || echo "[Warn] EIA API timed out — using existing dim_energy_pricing_history records."
     fi
     if [ -f db/fetch_nrel_stations.py ]; then
-        python3 db/fetch_nrel_stations.py
+        python3 db/fetch_nrel_stations.py || echo "[Warn] NREL API timed out — using existing dim_charging_stations records."
     fi
     echo "[Done] Dimension tables seeded (dim_vehicle, dim_energy_pricing_history, dim_charging_stations)."
 fi
