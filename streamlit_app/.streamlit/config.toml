@@ -1,0 +1,7 @@
+[theme]
+base = "dark"
+backgroundColor = "#131722"
+secondaryBackgroundColor = "#1E2536"
+
+[client]
+toolbarMode = "developer"

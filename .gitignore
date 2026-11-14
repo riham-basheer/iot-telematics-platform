@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+__init__.py
 
 # Python virtual environments & secrets
 .venv/
@@ -16,6 +17,7 @@ data/bronze/*
 data/silver/*
 data/gold/*
 !data/**/.gitkeep
+data/
 
 # PySpark & Delta runtime checkpoints
 .checkpoint/
@@ -39,3 +41,8 @@ airflow/plugins/*
 .idea/
 .DS_Store
 *.swp
+
+
+backfill_run.log
+.agents/
+*.log
